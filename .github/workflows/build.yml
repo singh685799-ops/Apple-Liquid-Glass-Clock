@@ -1,0 +1,90 @@
+name: Build AppleLiquidGlassClock APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install font dependencies and build TTF
+        run: |
+          python -m pip install --upgrade pip
+          pip install fonttools shapely
+          python build_font.py
+          test -s assets/fonts/AppleLiquidGlassClock.ttf
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Ensure Android SDK Build-Tools 34.0.0 & Platform 34 exist
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" "platforms;android-34"
+
+      - name: Package, Align, and Sign APK (V1 + V2 + V3)
+        run: |
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          PLATFORM="$ANDROID_HOME/platforms/android-34/android.jar"
+
+          mkdir -p dist
+
+          # 1. Package resources and assets into unaligned APK
+          "$BUILD_TOOLS/aapt" package -f -m \
+            -M AndroidManifest.xml \
+            -S res \
+            -A assets \
+            -I "$PLATFORM" \
+            -F raw.apk
+
+          # 2. 4-byte zipalign
+          "$BUILD_TOOLS/zipalign" -f -v 4 raw.apk aligned.apk
+
+          # 3. Generate signing keystore
+          keytool -genkeypair -v \
+            -keystore release.keystore \
+            -storepass android \
+            -alias appleliquidglass \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Monotype, OU=FlipFont, O=Monotype Imaging, L=Woburn, ST=MA, C=US"
+
+          # 4. Sign with V1, V2, and V3 signatures for Samsung One UI compatibility
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks release.keystore \
+            --ks-key-alias appleliquidglass \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out dist/AppleLiquidGlassClock.apk \
+            aligned.apk
+
+          # 5. Verify APK signature and copy standalone TTF into dist/
+          "$BUILD_TOOLS/apksigner" verify --verbose dist/AppleLiquidGlassClock.apk
+          cp assets/fonts/AppleLiquidGlassClock.ttf dist/AppleLiquidGlassClock.ttf
+
+      - name: Upload APK and TTF Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppleLiquidGlassClock-Release
+          path: |
+            dist/AppleLiquidGlassClock.apk
+            dist/AppleLiquidGlassClock.ttf
