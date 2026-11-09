@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.monotype.android.font.appleliquidglass"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk
+        android:minSdkVersion="24"
+        android:targetSdkVersion="33" />
+
+    <application
+        android:allowBackup="false"
+        android:hasCode="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name">
+
+        <meta-data
+            android:name="com.monotype.android.font.name"
+            android:value="AppleLiquidGlassClock" />
+    </application>
+</manifest>
