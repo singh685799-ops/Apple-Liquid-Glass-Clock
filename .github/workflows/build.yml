@@ -10,36 +10,44 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Normalize Project Structure & Clean Placeholder Files
+      - name: Install Android Packaging Tools & Font Libraries
         run: |
-          rm -f assets/fonts/nofiles.txt nofiles.txt
-          mkdir -p assets/fonts assets/xml res/values res/drawable dist
+          sudo apt-get update -y
+          sudo apt-get install -y aapt zipalign apksigner openjdk-17-jdk-headless android-sdk-platform-23
+          python -m pip install --upgrade pip
+          pip install fonttools shapely
 
-          # Ensure AndroidManifest.xml is in root and properly structured
-          cat << 'EOF' > AndroidManifest.xml
-          <?xml version="1.0" encoding="utf-8"?>
+      - name: Generate Clean Project Files & AppleLiquidGlassClock.ttf
+        run: |
+          python3 - << 'PYEOF'
+          import math
+          import os
+          import shutil
+          from fontTools.fontBuilder import FontBuilder
+          from fontTools.pens.ttGlyphPen import TTGlyphPen
+          from shapely.geometry import LineString, Point
+          from shapely.geometry.polygon import orient
+          from shapely.ops import unary_union
+
+          # 1. Start in a completely clean build directory
+          os.makedirs("clean_build/assets/fonts", exist_ok=True)
+          os.makedirs("clean_build/assets/xml", exist_ok=True)
+          os.makedirs("clean_build/res/values", exist_ok=True)
+          os.makedirs("clean_build/res/drawable", exist_ok=True)
+          os.makedirs("dist", exist_ok=True)
+
+          # 2. Write XML files with zero leading spaces before <?xml
+          manifest_xml = """<?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="com.monotype.android.font.appleliquidglass"
               android:versionCode="1"
               android:versionName="1.0">
-              <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="33" />
+              <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="23" />
               <application
                   android:allowBackup="false"
                   android:hasCode="false"
@@ -49,21 +57,15 @@ jobs:
                       android:name="com.monotype.android.font.name"
                       android:value="AppleLiquidGlassClock" />
               </application>
-          </manifest>
-          EOF
+          </manifest>"""
 
-          # Ensure strings.xml is in res/values/
-          cat << 'EOF' > res/values/strings.xml
-          <?xml version="1.0" encoding="utf-8"?>
+          strings_xml = """<?xml version="1.0" encoding="utf-8"?>
           <resources>
               <string name="app_name">AppleLiquidGlassClock</string>
               <string name="font_name">AppleLiquidGlassClock</string>
-          </resources>
-          EOF
+          </resources>"""
 
-          # Ensure ic_launcher.xml is in res/drawable/
-          cat << 'EOF' > res/drawable/ic_launcher.xml
-          <?xml version="1.0" encoding="utf-8"?>
+          launcher_xml = """<?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp"
               android:height="108dp"
@@ -71,12 +73,9 @@ jobs:
               android:viewportHeight="108">
               <path android:fillColor="#0A192F" android:pathData="M0,0h108v108h-108z" />
               <path android:fillColor="#E6F1FF" android:pathData="M54,18 A36,36 0 1,0 54,90 A36,36 0 1,0 54,18 Z M54,25 A29,29 0 1,1 54,83 A29,29 0 1,1 54,25 Z M51,34 h6 v22 h15 v6 h-21 Z" />
-          </vector>
-          EOF
+          </vector>"""
 
-          # Ensure AppleLiquidGlassClock.xml is in assets/xml/
-          cat << 'EOF' > assets/xml/AppleLiquidGlassClock.xml
-          <?xml version="1.0" encoding="utf-8"?>
+          font_xml = """<?xml version="1.0" encoding="utf-8"?>
           <font displayname="AppleLiquidGlassClock">
               <sans>
                   <file>
@@ -84,36 +83,147 @@ jobs:
                       <droidname>DroidSans.ttf</droidname>
                   </file>
               </sans>
-          </font>
-          EOF
+          </font>"""
 
-      - name: Install Font Dependencies & Generate TTF
+          def write_clean(path, content):
+              lines = [line.strip() for line in content.strip().splitlines()]
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write("\n".join(lines) + "\n")
+
+          write_clean("clean_build/AndroidManifest.xml", manifest_xml)
+          write_clean("clean_build/res/values/strings.xml", strings_xml)
+          write_clean("clean_build/res/drawable/ic_launcher.xml", launcher_xml)
+          write_clean("clean_build/assets/xml/AppleLiquidGlassClock.xml", font_xml)
+
+          # 3. Build AppleLiquidGlassClock.ttf
+          R = 29.0
+          X_LEFT, X_RIGHT, X_MID = 74.0, 286.0, 180.0
+          Y_BOT, Y_TOP = 29.0, 851.0
+          RAD = 106.0
+
+          def arc_pts(cx, cy, rx, ry, deg_start, deg_end, steps=48):
+              return [
+                  (
+                      cx + rx * math.cos(math.radians(deg_start + (deg_end - deg_start) * (i / float(steps)))),
+                      cy + ry * math.sin(math.radians(deg_start + (deg_end - deg_start) * (i / float(steps)))),
+                  )
+                  for i in range(steps + 1)
+              ]
+
+          def cubic_bezier(p0, p1, p2, p3, steps=48):
+              pts = []
+              for i in range(steps + 1):
+                  t = i / float(steps)
+                  mt = 1.0 - t
+                  x = (mt**3)*p0[0] + 3*(mt**2)*t*p1[0] + 3*mt*(t**2)*p2[0] + (t**3)*p3[0]
+                  y = (mt**3)*p0[1] + 3*(mt**2)*t*p1[1] + 3*mt*(t**2)*p2[1] + (t**3)*p3[1]
+                  pts.append((x, y))
+              return pts
+
+          def stroke_lines(lines_list, radius=R):
+              shapes = [LineString(pts).buffer(radius, cap_style=1, join_style=1, quad_segs=24) for pts in lines_list]
+              return unary_union(shapes).simplify(0.35, preserve_topology=True)
+
+          def poly_to_ttglyph(geom):
+              pen = TTGlyphPen(None)
+              if geom is None or geom.is_empty:
+                  return pen.glyph()
+              polys = [geom] if geom.geom_type == "Polygon" else list(geom.geoms)
+              for poly in polys:
+                  oriented = orient(poly, sign=-1.0)
+                  for ring in [oriented.exterior] + list(oriented.interiors):
+                      pts = []
+                      for x, y in list(ring.coords)[:-1]:
+                          pt = (int(round(x)), int(round(y)))
+                          if not pts or pts[-1] != pt:
+                              pts.append(pt)
+                      if len(pts) > 1 and pts[0] == pts[-1]:
+                          pts.pop()
+                      if len(pts) >= 3:
+                          pen.moveTo(pts[0])
+                          for pt in pts[1:]:
+                              pen.lineTo(pt)
+                          pen.closePath()
+              return pen.glyph()
+
+          top_cy, bot_cy = Y_TOP - RAD, Y_BOT + RAD
+          d0 = stroke_lines([arc_pts(X_MID, top_cy, RAD, RAD, 180, 0) + arc_pts(X_MID, bot_cy, RAD, RAD, 0, -180) + [(X_LEFT, top_cy)]])
+          d1 = stroke_lines([[(96.0, 765.0), (166.0, Y_TOP), (166.0, Y_BOT)]])
+          arch2 = [(X_LEFT, 705.0)] + arc_pts(X_MID, top_cy, RAD, RAD, 180, -15)
+          sweep2 = cubic_bezier(arch2[-1], (X_RIGHT + 4.0, 545.0), (X_LEFT + 10.0, 265.0), (X_LEFT, Y_BOT))
+          d2 = stroke_lines([arch2 + sweep2[1:], [(X_LEFT, Y_BOT), (X_RIGHT, Y_BOT)]])
+          d3 = stroke_lines([
+              [(X_LEFT + 4.0, 720.0)] + arc_pts(X_MID, top_cy, RAD, RAD, 175, 0) + [(X_RIGHT, 565.0)] + arc_pts(X_MID, 565.0, RAD, 109.0, 0, -90) + [(142.0, 456.0)],
+              [(142.0, 456.0)] + arc_pts(X_MID, 347.0, RAD, 109.0, 90, 0) + [(X_RIGHT, bot_cy)] + arc_pts(X_MID, bot_cy, RAD, RAD, 0, -175) + [(X_LEFT + 4.0, 160.0)]
+          ])
+          d4 = stroke_lines([[(236.0, Y_BOT), (236.0, Y_TOP)], [(236.0, Y_TOP), (66.0, 265.0), (298.0, 265.0)]])
+          d5 = stroke_lines([
+              [(276.0, Y_TOP), (82.0, Y_TOP), (76.0, 470.0)],
+              [(76.0, 470.0)] + arc_pts(X_MID, 395.0, RAD, 120.0, 155, 0) + [(X_RIGHT, bot_cy)] + arc_pts(X_MID, bot_cy, RAD, RAD, 0, -175) + [(X_LEFT + 4.0, 165.0)]
+          ])
+          d6 = stroke_lines([[(X_RIGHT - 6.0, 725.0)] + arc_pts(X_MID, top_cy, RAD, RAD, 15, 180) + [(X_LEFT, bot_cy)] + arc_pts(X_MID, bot_cy, RAD, RAD, 180, 360) + [(X_RIGHT, 355.0)] + arc_pts(X_MID, 355.0, RAD, 115.0, 0, 180)])
+          d7 = stroke_lines([[(70.0, Y_TOP), (X_RIGHT, Y_TOP), (X_RIGHT, 815.0), (134.0, Y_BOT)]])
+          d8 = stroke_lines([
+              arc_pts(X_MID, Y_TOP - 100.0, 100.0, 100.0, 180, 0) + arc_pts(X_MID, 550.0, 100.0, 98.0, 0, -180) + [(X_MID - 100.0, Y_TOP - 100.0)],
+              arc_pts(X_MID, 350.0, RAD, 102.0, 180, 0) + arc_pts(X_MID, bot_cy, RAD, RAD, 0, -180) + [(X_LEFT, 350.0)]
+          ])
+          d9 = stroke_lines([[(X_LEFT + 6.0, 155.0)] + arc_pts(X_MID, bot_cy, RAD, RAD, 195, 360) + [(X_RIGHT, top_cy)] + arc_pts(X_MID, top_cy, RAD, RAD, 0, 180) + [(X_LEFT, 525.0)] + arc_pts(X_MID, 525.0, RAD, 115.0, 180, 360)])
+          d_colon = unary_union([Point(80.0, 600.0).buffer(34.0, quad_segs=24), Point(80.0, 280.0).buffer(34.0, quad_segs=24)]).simplify(0.35, preserve_topology=True)
+          d_notdef = LineString([(50, 20), (50, 860), (250, 860), (250, 20), (50, 20)]).buffer(16.0, cap_style=1, join_style=1)
+
+          glyph_order = [".notdef", "space", "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "colon"]
+          cmap = {
+              0x0020: "space", 0x0030: "zero", 0x0031: "one", 0x0032: "two", 0x0033: "three",
+              0x0034: "four", 0x0035: "five", 0x0036: "six", 0x0037: "seven", 0x0038: "eight",
+              0x0039: "nine", 0x003A: "colon", 0x2236: "colon", 0xA789: "colon", 0xFE55: "colon", 0xFF1A: "colon"
+          }
+          glyphs = {
+              ".notdef": poly_to_ttglyph(d_notdef), "space": TTGlyphPen(None).glyph(),
+              "zero": poly_to_ttglyph(d0), "one": poly_to_ttglyph(d1), "two": poly_to_ttglyph(d2),
+              "three": poly_to_ttglyph(d3), "four": poly_to_ttglyph(d4), "five": poly_to_ttglyph(d5),
+              "six": poly_to_ttglyph(d6), "seven": poly_to_ttglyph(d7), "eight": poly_to_ttglyph(d8),
+              "nine": poly_to_ttglyph(d9), "colon": poly_to_ttglyph(d_colon),
+          }
+          metrics = {
+              ".notdef": (300, 34), "space": (180, 0), "zero": (360, 45), "one": (250, 67),
+              "two": (360, 45), "three": (360, 45), "four": (360, 37), "five": (360, 45),
+              "six": (360, 45), "seven": (360, 41), "eight": (360, 45), "nine": (360, 45), "colon": (160, 46),
+          }
+
+          fb = FontBuilder(unitsPerEm=1000, isTTF=True)
+          fb.setupGlyphOrder(glyph_order)
+          fb.setupCharacterMap(cmap)
+          fb.setupGlyf(glyphs)
+          fb.setupHorizontalMetrics(metrics)
+          fb.setupHorizontalHeader(ascent=940, descent=-120)
+          fb.setupNameTable({
+              "familyName": "AppleLiquidGlassClock", "styleName": "Regular",
+              "uniqueFontIdentifier": "AppleLiquidGlassClock-Regular",
+              "fullName": "AppleLiquidGlassClock", "version": "Version 1.0",
+              "psName": "AppleLiquidGlassClock-Regular",
+          })
+          fb.setupOS2(sTypoAscender=940, sTypoDescender=-120, sTypoLineGap=0, usWinAscent=940, usWinDescent=120, sxHeight=520, sCapHeight=880, fsType=0)
+          fb.setupPost()
+
+          ttf_out = "clean_build/assets/fonts/AppleLiquidGlassClock.ttf"
+          fb.save(ttf_out)
+          shutil.copy(ttf_out, "dist/AppleLiquidGlassClock.ttf")
+          print("TTF successfully created:", os.path.getsize(ttf_out), "bytes")
+          PYEOF
+
+      - name: Compile, Align, and Sign APK
         run: |
-          python -m pip install --upgrade pip
-          pip install fonttools shapely
-          if [ ! -f build_font.py ]; then
-            FOUND_SCRIPT=$(find . -name "build_font.py" | head -n 1)
-            if [ -n "$FOUND_SCRIPT" ]; then cp "$FOUND_SCRIPT" ./build_font.py; fi
-          fi
-          python build_font.py
-          test -s assets/fonts/AppleLiquidGlassClock.ttf
+          PLATFORM_JAR=$(find /usr/lib/android-sdk/platforms /usr/local/lib/android/sdk/platforms -name "android.jar" 2>/dev/null | head -n 1)
+          echo "Using platform jar: $PLATFORM_JAR"
 
-      - name: Install Android Build-Tools & Package Signed APK
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "build-tools;34.0.0" "platforms;android-34"
-
-          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/34.0.0"
-          PLATFORM="$ANDROID_SDK_ROOT/platforms/android-34/android.jar"
-
-          "$BUILD_TOOLS/aapt" package -f -m \
-            -M AndroidManifest.xml \
-            -S res \
-            -A assets \
-            -I "$PLATFORM" \
+          aapt package -f -m \
+            -M clean_build/AndroidManifest.xml \
+            -S clean_build/res \
+            -A clean_build/assets \
+            -I "$PLATFORM_JAR" \
             -F raw.apk
 
-          "$BUILD_TOOLS/zipalign" -f -v 4 raw.apk aligned.apk
+          zipalign -f -v 4 raw.apk aligned.apk
 
           keytool -genkeypair -v \
             -keystore release.keystore \
@@ -125,7 +235,7 @@ jobs:
             -validity 10000 \
             -dname "CN=Monotype, OU=FlipFont, O=Monotype Imaging, L=Woburn, ST=MA, C=US"
 
-          "$BUILD_TOOLS/apksigner" sign \
+          apksigner sign \
             --ks release.keystore \
             --ks-key-alias appleliquidglass \
             --ks-pass pass:android \
@@ -136,8 +246,7 @@ jobs:
             --out dist/AppleLiquidGlassClock.apk \
             aligned.apk
 
-          "$BUILD_TOOLS/apksigner" verify --verbose dist/AppleLiquidGlassClock.apk
-          cp assets/fonts/AppleLiquidGlassClock.ttf dist/AppleLiquidGlassClock.ttf
+          apksigner verify --verbose dist/AppleLiquidGlassClock.apk
 
       - name: Upload APK and TTF Artifact
         uses: actions/upload-artifact@v4
