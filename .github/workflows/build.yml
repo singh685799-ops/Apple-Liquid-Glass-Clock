@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
@@ -18,32 +18,94 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install font dependencies and build TTF
-        run: |
-          python -m pip install --upgrade pip
-          pip install fonttools shapely
-          python build_font.py
-          test -s assets/fonts/AppleLiquidGlassClock.ttf
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Ensure Android SDK Build-Tools 34.0.0 & Platform 34 exist
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Normalize Project Structure & Clean Placeholder Files
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" "platforms;android-34"
+          rm -f assets/fonts/nofiles.txt nofiles.txt
+          mkdir -p assets/fonts assets/xml res/values res/drawable dist
 
-      - name: Package, Align, and Sign APK (V1 + V2 + V3)
+          # Ensure AndroidManifest.xml is in root and properly structured
+          cat << 'EOF' > AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.monotype.android.font.appleliquidglass"
+              android:versionCode="1"
+              android:versionName="1.0">
+              <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="33" />
+              <application
+                  android:allowBackup="false"
+                  android:hasCode="false"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="@string/app_name">
+                  <meta-data
+                      android:name="com.monotype.android.font.name"
+                      android:value="AppleLiquidGlassClock" />
+              </application>
+          </manifest>
+          EOF
+
+          # Ensure strings.xml is in res/values/
+          cat << 'EOF' > res/values/strings.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">AppleLiquidGlassClock</string>
+              <string name="font_name">AppleLiquidGlassClock</string>
+          </resources>
+          EOF
+
+          # Ensure ic_launcher.xml is in res/drawable/
+          cat << 'EOF' > res/drawable/ic_launcher.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#0A192F" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#E6F1FF" android:pathData="M54,18 A36,36 0 1,0 54,90 A36,36 0 1,0 54,18 Z M54,25 A29,29 0 1,1 54,83 A29,29 0 1,1 54,25 Z M51,34 h6 v22 h15 v6 h-21 Z" />
+          </vector>
+          EOF
+
+          # Ensure AppleLiquidGlassClock.xml is in assets/xml/
+          cat << 'EOF' > assets/xml/AppleLiquidGlassClock.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <font displayname="AppleLiquidGlassClock">
+              <sans>
+                  <file>
+                      <filename>AppleLiquidGlassClock.ttf</filename>
+                      <droidname>DroidSans.ttf</droidname>
+                  </file>
+              </sans>
+          </font>
+          EOF
+
+      - name: Install Font Dependencies & Generate TTF
         run: |
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
-          PLATFORM="$ANDROID_HOME/platforms/android-34/android.jar"
+          python -m pip install --upgrade pip
+          pip install fonttools shapely
+          if [ ! -f build_font.py ]; then
+            FOUND_SCRIPT=$(find . -name "build_font.py" | head -n 1)
+            if [ -n "$FOUND_SCRIPT" ]; then cp "$FOUND_SCRIPT" ./build_font.py; fi
+          fi
+          python build_font.py
+          test -s assets/fonts/AppleLiquidGlassClock.ttf
 
-          mkdir -p dist
+      - name: Install Android Build-Tools & Package Signed APK
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "build-tools;34.0.0" "platforms;android-34"
 
-          # 1. Package resources and assets into unaligned APK
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+          PLATFORM="$ANDROID_SDK_ROOT/platforms/android-34/android.jar"
+
           "$BUILD_TOOLS/aapt" package -f -m \
             -M AndroidManifest.xml \
             -S res \
@@ -51,10 +113,8 @@ jobs:
             -I "$PLATFORM" \
             -F raw.apk
 
-          # 2. 4-byte zipalign
           "$BUILD_TOOLS/zipalign" -f -v 4 raw.apk aligned.apk
 
-          # 3. Generate signing keystore
           keytool -genkeypair -v \
             -keystore release.keystore \
             -storepass android \
@@ -65,7 +125,6 @@ jobs:
             -validity 10000 \
             -dname "CN=Monotype, OU=FlipFont, O=Monotype Imaging, L=Woburn, ST=MA, C=US"
 
-          # 4. Sign with V1, V2, and V3 signatures for Samsung One UI compatibility
           "$BUILD_TOOLS/apksigner" sign \
             --ks release.keystore \
             --ks-key-alias appleliquidglass \
@@ -77,7 +136,6 @@ jobs:
             --out dist/AppleLiquidGlassClock.apk \
             aligned.apk
 
-          # 5. Verify APK signature and copy standalone TTF into dist/
           "$BUILD_TOOLS/apksigner" verify --verbose dist/AppleLiquidGlassClock.apk
           cp assets/fonts/AppleLiquidGlassClock.ttf dist/AppleLiquidGlassClock.ttf
 
