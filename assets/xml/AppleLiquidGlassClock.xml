@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<font displayname="AppleLiquidGlassClock">
+    <sans>
+        <file>
+            <filename>AppleLiquidGlassClock.ttf</filename>
+            <droidname>DroidSans.ttf</droidname>
+        </file>
+    </sans>
+</font>
